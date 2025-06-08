@@ -1,25 +1,18 @@
 -- ~/.config/nvim/lua/git-commit/init.lua
--- Interactive Git Commit Plugin for Neovim with File Selection and Diff Preview
+-- Simple 3-Panel Git Commit Interface
 
 local M = {}
 
 -- Plugin configuration
 M.config = {
-	auto_stage = true,
-	confirm_commit = true,
-	max_message_length = 50,
-	use_fallback = true,
 	show_notifications = true,
 	keymaps = {
 		git_commit = "<leader>gc",
-		auto_commit = "<leader>gC",
-		dry_run = "<leader>gd",
 	},
 	ui = {
 		border = "rounded",
-		width = 0.8,
-		height = 0.8,
-		preview_width = 0.5,
+		width = 0.95,
+		height = 0.85,
 	},
 }
 
@@ -29,17 +22,16 @@ local fn = vim.fn
 local notify = vim.notify
 
 -- UI state
-local current_files = {}
-local selected_files = {}
+local staged_files = {}
+local all_files = {}
 local commit_buf = nil
-local file_buf = nil
-local preview_buf = nil
+local files_buf = nil
+local diff_buf = nil
 local commit_win = nil
-local file_win = nil
-local preview_win = nil
+local files_win = nil
+local diff_win = nil
 local current_commit_message = ""
-local is_editing_message = false
-local original_commit_message = ""
+local focused_file_index = nil
 
 -- Utility functions
 local function notify_info(msg)
@@ -51,12 +43,6 @@ end
 local function notify_error(msg)
 	if M.config.show_notifications then
 		notify(msg, vim.log.levels.ERROR, { title = "GitCommit" })
-	end
-end
-
-local function notify_warn(msg)
-	if M.config.show_notifications then
-		notify(msg, vim.log.levels.WARN, { title = "GitCommit" })
 	end
 end
 
@@ -82,18 +68,65 @@ local function is_git_repo()
 	return err == nil
 end
 
-local function get_git_status()
-	return run_git_command("status --porcelain")
-end
-
-local function get_file_diff(filepath)
-	local staged_diff, _ = run_git_command("diff --cached -- " .. vim.fn.shellescape(filepath))
-	if staged_diff and staged_diff ~= "" then
-		return staged_diff, "staged"
+local function get_all_files()
+	local output, err = run_git_command("status --porcelain")
+	if err or not output or output == "" then
+		return {}
 	end
 
-	local unstaged_diff, _ = run_git_command("diff -- " .. vim.fn.shellescape(filepath))
-	return unstaged_diff or "", "unstaged"
+	local files = {}
+	for line in output:gmatch("[^\r\n]+") do
+		if line:len() > 3 then
+			local status_code = line:sub(1, 2)
+			local filename = line:sub(4)
+
+			local staged_status = status_code:sub(1, 1)
+			local unstaged_status = status_code:sub(2, 2)
+
+			local status_desc = "Modified"
+			local color = "Normal"
+			local is_staged = staged_status ~= " " and staged_status ~= "?"
+
+			if staged_status == "A" or unstaged_status == "A" then
+				status_desc = "Added"
+				color = "DiffAdd"
+			elseif staged_status == "D" or unstaged_status == "D" then
+				status_desc = "Deleted"
+				color = "DiffDelete"
+			elseif staged_status == "M" or unstaged_status == "M" then
+				status_desc = "Modified"
+				color = "Normal"
+			elseif staged_status == "R" then
+				status_desc = "Renamed"
+				color = "DiffChange"
+			elseif staged_status == "?" then
+				status_desc = "Untracked"
+				color = "Comment"
+				is_staged = false
+			end
+
+			table.insert(files, {
+				status = staged_status,
+				status_desc = status_desc,
+				filename = filename,
+				color = color,
+				is_staged = is_staged,
+				display_name = (is_staged and "●" or "○") .. " " .. staged_status .. " " .. filename,
+			})
+		end
+	end
+
+	return files
+end
+
+local function get_staged_files()
+	local files = {}
+	for _, file in ipairs(all_files) do
+		if file.is_staged then
+			table.insert(files, file)
+		end
+	end
+	return files
 end
 
 local function stage_file(filepath)
@@ -106,62 +139,82 @@ local function unstage_file(filepath)
 	return err == nil
 end
 
-local function commit_changes(message)
-	local escaped_message = message:gsub('"', '\\"')
-	local _, err = run_git_command('commit -m "' .. escaped_message .. '"')
-	return err == nil
-end
-
--- File analysis functions
-local function parse_git_status(status_output)
-	if not status_output or status_output == "" then
-		return {}
+local function get_file_diff(filepath, staged_only)
+	if not filepath then
+		return "", "No file selected"
 	end
 
-	local files = {}
-	for line in status_output:gmatch("[^\r\n]+") do
-		if line:len() > 3 then
-			local status_code = line:sub(1, 2)
-			local filename = line:sub(4)
+	local diff_cmd = staged_only and "diff --cached" or "diff"
+	local diff, err = run_git_command(diff_cmd .. " -- " .. vim.fn.shellescape(filepath))
+	if err then
+		return "", err
+	end
 
-			local status_desc = "Modified"
-			local status_char = "M"
+	return diff or "", nil
+end
 
-			if status_code:sub(1, 1) == "A" then
-				status_desc = "Added"
-				status_char = "A"
-			elseif status_code:sub(1, 1) == "D" then
-				status_desc = "Deleted"
-				status_char = "D"
-			elseif status_code:sub(1, 1) == "R" then
-				status_desc = "Renamed"
-				status_char = "R"
-			elseif status_code:sub(1, 1) == "C" then
-				status_desc = "Copied"
-				status_char = "C"
-			elseif status_code:sub(1, 1) == "?" then
-				status_desc = "Untracked"
-				status_char = "?"
+local function get_all_staged_diffs()
+	if #staged_files == 0 then
+		return {
+			"No files staged for commit",
+			"",
+			"Stage files with 's' key or use: git add <file>",
+			"",
+			"Available files are shown in the left panel.",
+			"● = staged, ○ = unstaged",
+		}
+	end
+
+	local all_diffs = {}
+	table.insert(all_diffs, "=== ALL STAGED FILES DIFF ===")
+	table.insert(all_diffs, "")
+	table.insert(all_diffs, "Files to be committed (" .. #staged_files .. "):")
+
+	for _, file in ipairs(staged_files) do
+		table.insert(all_diffs, "  " .. file.display_name)
+	end
+
+	table.insert(all_diffs, "")
+	table.insert(
+		all_diffs,
+		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	)
+	table.insert(all_diffs, "")
+
+	for i, file in ipairs(staged_files) do
+		table.insert(all_diffs, "")
+		table.insert(all_diffs, "=== FILE " .. i .. "/" .. #staged_files .. ": " .. file.filename .. " ===")
+		table.insert(all_diffs, "Status: " .. file.status_desc)
+		table.insert(all_diffs, "")
+
+		local diff_content, err = get_file_diff(file.filename, true)
+		if err or not diff_content or diff_content == "" then
+			if file.status == "D" then
+				table.insert(all_diffs, "File deleted - no diff content")
+			elseif file.status == "A" then
+				table.insert(all_diffs, "New file added - content not shown in diff")
+			else
+				table.insert(all_diffs, "No diff content available")
 			end
-
-			table.insert(files, {
-				status = status_code,
-				status_char = status_char,
-				status_desc = status_desc,
-				filename = filename,
-				display_name = string.format("[%s] %s", status_char, filename),
-				is_staged = status_code:sub(1, 1):match("[AMDRC]") ~= nil,
-				selected = false,
-			})
+		else
+			local diff_lines = vim.split(diff_content, "\n")
+			for _, line in ipairs(diff_lines) do
+				table.insert(all_diffs, line)
+			end
 		end
+
+		table.insert(all_diffs, "")
+		table.insert(
+			all_diffs,
+			"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+		)
 	end
 
-	return files
+	return all_diffs
 end
 
--- Fallback commit message generation
-local function generate_fallback_commit_message(files_info)
-	if #files_info == 0 then
+local function generate_commit_message_from_staged()
+	if #staged_files == 0 then
 		return "chore: update files"
 	end
 
@@ -169,12 +222,12 @@ local function generate_fallback_commit_message(files_info)
 	local modified_files = {}
 	local deleted_files = {}
 
-	for _, file in ipairs(files_info) do
-		if file.status_char == "A" then
+	for _, file in ipairs(staged_files) do
+		if file.status == "A" then
 			table.insert(added_files, file)
-		elseif file.status_char == "M" then
+		elseif file.status == "M" then
 			table.insert(modified_files, file)
-		elseif file.status_char == "D" then
+		elseif file.status == "D" then
 			table.insert(deleted_files, file)
 		end
 	end
@@ -209,131 +262,195 @@ local function generate_fallback_commit_message(files_info)
 			return "chore: update " .. #modified_files .. " files"
 		end
 	else
-		return "chore: update repository"
-	end
-end
-
--- Main commit message generation
-local function generate_commit_message(files_info)
-	local diff_content = ""
-	for _, file in ipairs(files_info) do
-		if file.selected then
-			local file_diff, _ = get_file_diff(file.filename)
-			diff_content = diff_content .. file_diff .. "\n"
+		local parts = {}
+		if #added_files > 0 then
+			table.insert(parts, "add " .. #added_files .. " files")
 		end
+		if #modified_files > 0 then
+			table.insert(parts, "update " .. #modified_files .. " files")
+		end
+		if #deleted_files > 0 then
+			table.insert(parts, "remove " .. #deleted_files .. " files")
+		end
+		return "chore: " .. table.concat(parts, ", ")
 	end
-
-	-- Use fallback generation
-	if M.config.use_fallback then
-		return generate_fallback_commit_message(files_info)
-	end
-
-	return nil, "Failed to generate commit message"
 end
 
 -- UI Functions
-local function close_git_commit_ui()
-	if commit_win and api.nvim_win_is_valid(commit_win) then
-		api.nvim_win_close(commit_win, true)
-	end
-	if file_win and api.nvim_win_is_valid(file_win) then
-		api.nvim_win_close(file_win, true)
-	end
-	if preview_win and api.nvim_win_is_valid(preview_win) then
-		api.nvim_win_close(preview_win, true)
-	end
+function M.close_git_commit_ui()
+	local windows = { commit_win, files_win, diff_win }
+	local buffers = { commit_buf, files_buf, diff_buf }
 
-	if commit_buf and api.nvim_buf_is_valid(commit_buf) then
-		api.nvim_buf_delete(commit_buf, { force = true })
-	end
-	if file_buf and api.nvim_buf_is_valid(file_buf) then
-		api.nvim_buf_delete(file_buf, { force = true })
-	end
-	if preview_buf and api.nvim_buf_is_valid(preview_buf) then
-		api.nvim_buf_delete(preview_buf, { force = true })
-	end
-
-	commit_win, file_win, preview_win = nil, nil, nil
-	commit_buf, file_buf, preview_buf = nil, nil, nil
-	current_files = {}
-	selected_files = {}
-	current_commit_message = ""
-	is_editing_message = false
-	original_commit_message = ""
-end
-
-local function update_file_list()
-	if not file_buf or not api.nvim_buf_is_valid(file_buf) then
-		return
-	end
-
-	api.nvim_buf_set_option(file_buf, "modifiable", true)
-
-	local lines = {}
-	table.insert(lines, "📁 Select files to commit (Space to toggle, Enter to preview):")
-	table.insert(lines, "")
-
-	for i, file in ipairs(current_files) do
-		local prefix = file.selected and "✓ " or "  "
-		local staged_indicator = file.is_staged and "●" or "○"
-		local line = string.format("%s%s %s %s", prefix, staged_indicator, file.status_char, file.filename)
-		table.insert(lines, line)
-	end
-
-	table.insert(lines, "")
-	table.insert(lines, "Usage:")
-	table.insert(lines, "  <Space>   Toggle file selection")
-	table.insert(lines, "  <Enter>   Preview file diff")
-	table.insert(lines, "  s         Stage/unstage file")
-	table.insert(lines, "  <Tab>     Generate commit message")
-	table.insert(lines, "  q         Quit")
-
-	api.nvim_buf_set_lines(file_buf, 0, -1, false, lines)
-	api.nvim_buf_set_option(file_buf, "modifiable", false)
-
-	local ns_id = api.nvim_create_namespace("git_commit_files")
-	api.nvim_buf_clear_namespace(file_buf, ns_id, 0, -1)
-
-	for i, file in ipairs(current_files) do
-		local line_nr = i + 1
-		if file.selected then
-			api.nvim_buf_add_highlight(file_buf, ns_id, "DiffAdd", line_nr, 0, -1)
-		elseif file.is_staged then
-			api.nvim_buf_add_highlight(file_buf, ns_id, "DiffChange", line_nr, 0, -1)
+	for _, win in ipairs(windows) do
+		if win and api.nvim_win_is_valid(win) then
+			api.nvim_win_close(win, true)
 		end
 	end
+
+	for _, buf in ipairs(buffers) do
+		if buf and api.nvim_buf_is_valid(buf) then
+			api.nvim_buf_delete(buf, { force = true })
+		end
+	end
+
+	commit_win, files_win, diff_win = nil, nil, nil
+	commit_buf, files_buf, diff_buf = nil, nil, nil
+	staged_files = {}
+	all_files = {}
+	current_commit_message = ""
+	focused_file_index = nil
 end
 
-local function update_preview(file_index)
-	if not preview_buf or not api.nvim_buf_is_valid(preview_buf) then
+local function update_commit_message()
+	if not commit_buf or not api.nvim_buf_is_valid(commit_buf) then
 		return
 	end
 
-	api.nvim_buf_set_option(preview_buf, "modifiable", true)
+	api.nvim_buf_set_option(commit_buf, "modifiable", true)
 
-	if not file_index or file_index > #current_files then
-		api.nvim_buf_set_lines(preview_buf, 0, -1, false, { "Select a file to preview changes" })
-		api.nvim_buf_set_option(preview_buf, "modifiable", false)
+	local lines = {
+		current_commit_message,
+		"",
+		"-- Auto-generated from staged files --",
+		"-- Edit above, then press <Enter> to commit --",
+		"-- Press 'r' to regenerate message --",
+		"-- Press 'q' to quit --",
+	}
+
+	api.nvim_buf_set_lines(commit_buf, 0, -1, false, lines)
+
+	if api.nvim_get_current_win() == commit_win then
+		api.nvim_win_set_cursor(commit_win, { 1, 0 })
+	end
+end
+
+local function update_files_list()
+	if not files_buf or not api.nvim_buf_is_valid(files_buf) then
 		return
 	end
 
-	local file = current_files[file_index]
-	local diff_content, diff_type = get_file_diff(file.filename)
+	api.nvim_buf_set_option(files_buf, "modifiable", true)
 
-	if not diff_content or diff_content == "" then
-		api.nvim_buf_set_lines(preview_buf, 0, -1, false, {
-			"No changes to preview for: " .. file.filename,
+	local lines = {}
+	table.insert(lines, "Files (" .. #staged_files .. " staged):")
+	table.insert(lines, "")
+
+	for i, file in ipairs(all_files) do
+		table.insert(lines, file.display_name)
+	end
+
+	if #all_files == 0 then
+		table.insert(lines, "No files modified")
+	end
+
+	table.insert(lines, "")
+	table.insert(lines, "Legend: ● staged, ○ unstaged")
+	table.insert(lines, "")
+	table.insert(lines, "Navigation:")
+	table.insert(lines, "  j/k      Move up/down")
+	table.insert(lines, "  s        Stage/unstage file")
+	table.insert(lines, "  <Enter>  View file diff")
+	table.insert(lines, "  <Tab>    Focus diff preview")
+	table.insert(lines, "  <S-Tab>  Focus commit message")
+	table.insert(lines, "  <C-c>    Commit")
+	table.insert(lines, "  q        Quit")
+
+	api.nvim_buf_set_lines(files_buf, 0, -1, false, lines)
+	api.nvim_buf_set_option(files_buf, "modifiable", false)
+
+	local ns_id = api.nvim_create_namespace("git_files")
+	api.nvim_buf_clear_namespace(files_buf, ns_id, 0, -1)
+
+	for i, file in ipairs(all_files) do
+		local line_nr = i + 1
+		api.nvim_buf_add_highlight(files_buf, ns_id, file.color, line_nr, 0, -1)
+	end
+end
+
+local function refresh_files()
+	all_files = get_all_files()
+	staged_files = get_staged_files()
+
+	current_commit_message = generate_commit_message_from_staged()
+	update_commit_message()
+	update_files_list()
+end
+
+local function commit_staged_files()
+	if #staged_files == 0 then
+		notify_error("No staged files to commit")
+		return
+	end
+
+	if current_commit_message == "" then
+		notify_error("No commit message provided")
+		return
+	end
+
+	local escaped_message = current_commit_message:gsub('"', '\\"')
+	local _, err = run_git_command('commit -m "' .. escaped_message .. '"')
+
+	if err then
+		notify_error("Failed to commit: " .. err)
+	else
+		notify_info("✅ Successfully committed " .. #staged_files .. " files!")
+		M.close_git_commit_ui()
+	end
+end
+
+local function update_diff_preview(file_index)
+	if not diff_buf or not api.nvim_buf_is_valid(diff_buf) then
+		return
+	end
+
+	api.nvim_buf_set_option(diff_buf, "modifiable", true)
+
+	if not file_index or file_index < 1 or file_index > #all_files then
+		focused_file_index = nil
+		local all_diffs = get_all_staged_diffs()
+		api.nvim_buf_set_lines(diff_buf, 0, -1, false, all_diffs)
+		api.nvim_buf_set_option(diff_buf, "filetype", "diff")
+		api.nvim_buf_set_option(diff_buf, "modifiable", false)
+		return
+	end
+
+	focused_file_index = file_index
+	local file = all_files[file_index]
+
+	local diff_content, err = get_file_diff(file.filename, file.is_staged)
+
+	if err or not diff_content or diff_content == "" then
+		local status_info = {
+			"📄 " .. file.filename,
+			"Status: " .. file.status_desc,
+			"Staged: " .. (file.is_staged and "Yes" or "No"),
 			"",
-			"File status: " .. file.status_desc,
-		})
-		api.nvim_buf_set_option(preview_buf, "modifiable", false)
+		}
+
+		if file.status == "D" then
+			table.insert(status_info, "This file was deleted")
+			table.insert(status_info, "No diff content to show")
+		elseif file.status == "A" then
+			table.insert(status_info, "This file was added")
+			if not diff_content or diff_content == "" then
+				table.insert(status_info, "File is empty or binary")
+			end
+		else
+			table.insert(status_info, "No diff content available")
+			table.insert(status_info, "File might be binary or unchanged")
+		end
+
+		api.nvim_buf_set_lines(diff_buf, 0, -1, false, status_info)
+		api.nvim_buf_set_option(diff_buf, "modifiable", false)
 		return
 	end
 
 	local lines = vim.split(diff_content, "\n")
 	local header = {
-		"📄 " .. file.filename .. " (" .. diff_type .. ")",
+		"📄 " .. file.filename,
 		"Status: " .. file.status_desc,
+		"Staged: " .. (file.is_staged and "Yes" or "No"),
+		"",
 		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
 		"",
 	}
@@ -346,69 +463,12 @@ local function update_preview(file_index)
 		table.insert(final_lines, line)
 	end
 
-	api.nvim_buf_set_lines(preview_buf, 0, -1, false, final_lines)
-	api.nvim_buf_set_option(preview_buf, "filetype", "diff")
-	api.nvim_buf_set_option(preview_buf, "modifiable", false)
+	api.nvim_buf_set_lines(diff_buf, 0, -1, false, final_lines)
+	api.nvim_buf_set_option(diff_buf, "filetype", "diff")
+	api.nvim_buf_set_option(diff_buf, "modifiable", false)
 end
 
--- Setup file buffer keymaps
-local function setup_file_buffer_keymaps()
-	if not file_buf then
-		return
-	end
-
-	local opts = { buffer = file_buf, noremap = true, silent = true }
-
-	vim.keymap.set("n", "<Space>", function()
-		local cursor_line = api.nvim_win_get_cursor(file_win)[1]
-		local file_index = cursor_line - 2
-
-		if file_index >= 1 and file_index <= #current_files then
-			current_files[file_index].selected = not current_files[file_index].selected
-			update_file_list()
-		end
-	end, opts)
-
-	vim.keymap.set("n", "<CR>", function()
-		local cursor_line = api.nvim_win_get_cursor(file_win)[1]
-		local file_index = cursor_line - 2
-		update_preview(file_index)
-	end, opts)
-
-	vim.keymap.set("n", "s", function()
-		local cursor_line = api.nvim_win_get_cursor(file_win)[1]
-		local file_index = cursor_line - 2
-
-		if file_index >= 1 and file_index <= #current_files then
-			local file = current_files[file_index]
-			if file.is_staged then
-				if unstage_file(file.filename) then
-					file.is_staged = false
-					notify_info("Unstaged: " .. file.filename)
-				else
-					notify_error("Failed to unstage: " .. file.filename)
-				end
-			else
-				if stage_file(file.filename) then
-					file.is_staged = true
-					notify_info("Staged: " .. file.filename)
-				else
-					notify_error("Failed to stage: " .. file.filename)
-				end
-			end
-			update_file_list()
-		end
-	end, opts)
-
-	vim.keymap.set("n", "<Tab>", function()
-		M.generate_and_show_commit_message()
-	end, opts)
-
-	vim.keymap.set("n", "q", close_git_commit_ui, opts)
-	vim.keymap.set("n", "<Esc>", close_git_commit_ui, opts)
-end
-
--- Setup commit buffer keymaps
+-- Keymaps
 local function setup_commit_buffer_keymaps()
 	if not commit_buf then
 		return
@@ -417,248 +477,155 @@ local function setup_commit_buffer_keymaps()
 	local opts = { buffer = commit_buf, noremap = true, silent = true }
 
 	vim.keymap.set("n", "<CR>", function()
-		M.execute_commit()
+		local lines = api.nvim_buf_get_lines(commit_buf, 0, 1, false)
+		if #lines > 0 then
+			current_commit_message = lines[1]:gsub("^%s*", ""):gsub("%s*$", "")
+			commit_staged_files()
+		end
+	end, opts)
+
+	vim.keymap.set("i", "<C-c>", function()
+		vim.cmd("stopinsert")
+		local lines = api.nvim_buf_get_lines(commit_buf, 0, 1, false)
+		if #lines > 0 then
+			current_commit_message = lines[1]:gsub("^%s*", ""):gsub("%s*$", "")
+			commit_staged_files()
+		end
 	end, opts)
 
 	vim.keymap.set("n", "r", function()
-		M.generate_and_show_commit_message()
+		current_commit_message = generate_commit_message_from_staged()
+		update_commit_message()
 	end, opts)
 
-	vim.keymap.set("n", "E", function()
-		M.quick_edit_commit_message()
+	vim.keymap.set("n", "<Tab>", function()
+		api.nvim_set_current_win(files_win)
 	end, opts)
 
-	vim.keymap.set("n", "e", function()
-		M.edit_commit_message()
+	-- Navigate to diff with Shift+Tab
+	vim.keymap.set("n", "<S-Tab>", function()
+		api.nvim_set_current_win(diff_win)
 	end, opts)
 
-	vim.keymap.set("i", "<C-s>", function()
-		M.save_commit_message()
+	-- Navigate to commit with Shift+Tab
+	vim.keymap.set("n", "<S-Tab>", function()
+		api.nvim_set_current_win(commit_win)
 	end, opts)
 
-	vim.keymap.set("i", "<Esc>", function()
-		M.cancel_edit_commit_message()
-	end, opts)
-
-	vim.keymap.set("n", "q", close_git_commit_ui, opts)
-	vim.keymap.set("n", "<Esc>", close_git_commit_ui, opts)
+	vim.keymap.set("n", "q", M.close_git_commit_ui, opts)
+	vim.keymap.set("n", "<Esc>", M.close_git_commit_ui, opts)
 end
 
--- Edit functions
-function M.quick_edit_commit_message()
-	if current_commit_message == "" then
-		notify_warn("No commit message to edit. Generate one first with <Tab>")
+local function setup_diff_buffer_keymaps()
+	if not diff_buf then
 		return
 	end
 
-	vim.ui.input({
-		prompt = "Edit commit message: ",
-		default = current_commit_message,
-		completion = nil,
-	}, function(input)
-		if input and input:gsub("^%s*", ""):gsub("%s*$", "") ~= "" then
-			current_commit_message = input:gsub("^%s*", ""):gsub("%s*$", "")
-			is_editing_message = false
-			M.display_commit_message()
-			notify_info("💾 Commit message updated!")
+	local opts = { buffer = diff_buf, noremap = true, silent = true }
+
+	-- Navigate back to files panel
+	vim.keymap.set("n", "<Tab>", function()
+		api.nvim_set_current_win(files_win)
+	end, opts)
+
+	-- Navigate to commit message
+	vim.keymap.set("n", "<S-Tab>", function()
+		api.nvim_set_current_win(commit_win)
+	end, opts)
+
+	-- Navigate to files with h
+	vim.keymap.set("n", "h", function()
+		api.nvim_set_current_win(files_win)
+	end, opts)
+
+	-- Navigate to commit message with H
+	vim.keymap.set("n", "H", function()
+		api.nvim_set_current_win(commit_win)
+	end, opts)
+
+	-- Allow normal vim navigation in diff
+	-- j/k/g/G work normally for scrolling
+
+	-- Quick commit
+	vim.keymap.set("n", "<C-c>", function()
+		if current_commit_message ~= "" then
+			commit_staged_files()
 		else
-			notify_info("❌ Edit cancelled or empty message")
+			notify_error("No commit message. Focus commit panel and add message.")
 		end
-	end)
+	end, opts)
+
+	-- Quit
+	vim.keymap.set("n", "q", M.close_git_commit_ui, opts)
+	vim.keymap.set("n", "<Esc>", M.close_git_commit_ui, opts)
 end
 
-function M.edit_commit_message()
-	if not commit_buf or not api.nvim_buf_is_valid(commit_buf) then
+local function setup_files_buffer_keymaps()
+	if not files_buf then
 		return
 	end
 
-	original_commit_message = current_commit_message
-	is_editing_message = true
+	local opts = { buffer = files_buf, noremap = true, silent = true }
 
-	api.nvim_buf_set_option(commit_buf, "modifiable", true)
+	vim.keymap.set("n", "j", function()
+		vim.cmd("normal! j")
+		local cursor_line = api.nvim_win_get_cursor(files_win)[1]
+		local file_index = cursor_line - 2
+		update_diff_preview(file_index)
+	end, opts)
 
-	local lines = {
-		"✏️  Edit Commit Message:",
-		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-		"",
-		current_commit_message,
-		"",
-		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-		"",
-		"📝 Editing Mode:",
-		"  <Ctrl-s>  Save changes",
-		"  <Esc>     Cancel edit",
-		"",
-		"💡 Tips:",
-		"  • Use conventional commits (feat:, fix:, docs:, etc.)",
-		"  • Keep first line under 50 characters",
-		"  • Use imperative mood (Add, Fix, Update)",
-	}
+	vim.keymap.set("n", "k", function()
+		vim.cmd("normal! k")
+		local cursor_line = api.nvim_win_get_cursor(files_win)[1]
+		local file_index = cursor_line - 2
+		update_diff_preview(file_index)
+	end, opts)
 
-	api.nvim_buf_set_lines(commit_buf, 0, -1, false, lines)
+	vim.keymap.set("n", "s", function()
+		local cursor_line = api.nvim_win_get_cursor(files_win)[1]
+		local file_index = cursor_line - 2
 
-	api.nvim_set_current_win(commit_win)
-	api.nvim_win_set_cursor(commit_win, { 4, 0 })
+		if file_index >= 1 and file_index <= #all_files then
+			local file = all_files[file_index]
 
-	vim.cmd("startinsert!")
-
-	notify_info("✏️ Editing commit message - Use Ctrl-s to save, Esc to cancel")
-end
-
-function M.save_commit_message()
-	if not commit_buf or not api.nvim_buf_is_valid(commit_buf) or not is_editing_message then
-		return
-	end
-
-	local lines = api.nvim_buf_get_lines(commit_buf, 0, -1, false)
-	if #lines >= 4 then
-		local new_message = lines[4]:gsub("^%s*", ""):gsub("%s*$", "")
-
-		if new_message ~= "" then
-			current_commit_message = new_message
-			is_editing_message = false
-
-			vim.cmd("stopinsert")
-
-			M.display_commit_message()
-
-			notify_info("💾 Commit message saved!")
-		else
-			notify_warn("❌ Commit message cannot be empty")
-		end
-	end
-end
-
-function M.cancel_edit_commit_message()
-	if not is_editing_message then
-		return
-	end
-
-	current_commit_message = original_commit_message
-	is_editing_message = false
-
-	vim.cmd("stopinsert")
-
-	M.display_commit_message()
-
-	notify_info("❌ Edit cancelled")
-end
-
-function M.display_commit_message()
-	if not commit_buf or not api.nvim_buf_is_valid(commit_buf) then
-		return
-	end
-
-	api.nvim_buf_set_option(commit_buf, "modifiable", true)
-
-	local selected_files = {}
-	for _, file in ipairs(current_files) do
-		if file.selected then
-			table.insert(selected_files, file)
-		end
-	end
-
-	local lines = {
-		"💬 Commit Message:",
-		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-		"",
-		current_commit_message,
-		"",
-		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-		"",
-		"Selected files (" .. #selected_files .. "):",
-	}
-
-	for _, file in ipairs(selected_files) do
-		table.insert(lines, "  " .. file.display_name)
-	end
-
-	table.insert(lines, "")
-	table.insert(lines, "Commands:")
-	table.insert(lines, "  <Enter>  Commit with this message")
-	table.insert(lines, "  e        Edit message (in-buffer)")
-	table.insert(lines, "  E        Edit message (quick input)")
-	table.insert(lines, "  r        Regenerate message")
-	table.insert(lines, "  q        Cancel")
-
-	api.nvim_buf_set_lines(commit_buf, 0, -1, false, lines)
-	api.nvim_buf_set_option(commit_buf, "modifiable", false)
-
-	local ns_id = api.nvim_create_namespace("git_commit_message")
-	api.nvim_buf_clear_namespace(commit_buf, ns_id, 0, -1)
-	api.nvim_buf_add_highlight(commit_buf, ns_id, "String", 3, 0, -1)
-
-	api.nvim_set_current_win(commit_win)
-end
-
-function M.generate_and_show_commit_message()
-	local selected_files = {}
-	for _, file in ipairs(current_files) do
-		if file.selected then
-			table.insert(selected_files, file)
-		end
-	end
-
-	if #selected_files == 0 then
-		notify_warn("No files selected")
-		return
-	end
-
-	notify_info("🤖 Generating commit message...")
-	local commit_message = generate_commit_message(selected_files)
-
-	if not commit_message then
-		notify_error("Failed to generate commit message")
-		return
-	end
-
-	current_commit_message = commit_message
-	is_editing_message = false
-
-	M.display_commit_message()
-end
-
-function M.execute_commit()
-	if not commit_buf or not api.nvim_buf_is_valid(commit_buf) then
-		return
-	end
-
-	local commit_message = current_commit_message
-
-	if is_editing_message then
-		local lines = api.nvim_buf_get_lines(commit_buf, 0, -1, false)
-		if #lines >= 4 then
-			commit_message = lines[4]:gsub("^%s*", ""):gsub("%s*$", "")
-		end
-	end
-
-	if commit_message == "" then
-		notify_error("No commit message provided")
-		return
-	end
-
-	local selected_files = {}
-	for _, file in ipairs(current_files) do
-		if file.selected then
-			table.insert(selected_files, file)
-			if not file.is_staged then
-				stage_file(file.filename)
+			if file.is_staged then
+				if unstage_file(file.filename) then
+					notify_info("Unstaged: " .. file.filename)
+					refresh_files()
+					api.nvim_win_set_cursor(files_win, { cursor_line, 0 })
+					update_diff_preview(file_index)
+				end
+			else
+				if stage_file(file.filename) then
+					notify_info("Staged: " .. file.filename)
+					refresh_files()
+					api.nvim_win_set_cursor(files_win, { cursor_line, 0 })
+					update_diff_preview(file_index)
+				end
 			end
 		end
-	end
+	end, opts)
 
-	if #selected_files == 0 then
-		notify_error("No files selected")
-		return
-	end
+	vim.keymap.set("n", "<CR>", function()
+		local cursor_line = api.nvim_win_get_cursor(files_win)[1]
+		local file_index = cursor_line - 2
+		update_diff_preview(file_index)
+	end, opts)
 
-	notify_info("🚀 Committing changes...")
-	if commit_changes(commit_message) then
-		notify_info("✅ Successfully committed " .. #selected_files .. " files!")
-		close_git_commit_ui()
-	else
-		notify_error("❌ Failed to commit changes")
-	end
+	vim.keymap.set("n", "<Tab>", function()
+		api.nvim_set_current_win(diff_win)
+	end, opts)
+
+	vim.keymap.set("n", "<C-c>", function()
+		if current_commit_message ~= "" then
+			commit_staged_files()
+		else
+			notify_error("No commit message. Focus commit panel and add message.")
+		end
+	end, opts)
+
+	vim.keymap.set("n", "q", M.close_git_commit_ui, opts)
+	vim.keymap.set("n", "<Esc>", M.close_git_commit_ui, opts)
 end
 
 -- Main UI function
@@ -668,17 +635,14 @@ function M.show_git_commit_ui()
 		return
 	end
 
-	local status_output, err = get_git_status()
-	if err then
-		notify_error("Failed to get git status: " .. err)
+	refresh_files()
+
+	if #all_files == 0 then
+		notify_error("No files modified. Make some changes first.")
 		return
 	end
 
-	current_files = parse_git_status(status_output)
-	if #current_files == 0 then
-		notify_info("No changes to commit")
-		return
-	end
+	current_commit_message = generate_commit_message_from_staged()
 
 	local screen_width = api.nvim_get_option("columns")
 	local screen_height = api.nvim_get_option("lines")
@@ -687,30 +651,31 @@ function M.show_git_commit_ui()
 	local row = math.floor((screen_height - height) / 2)
 	local col = math.floor((screen_width - width) / 2)
 
-	local file_width = math.floor(width * (1 - M.config.ui.preview_width))
-	local preview_width = width - file_width - 1
-	local commit_height = 12
-	local file_height = height - commit_height - 1
+	local left_width = math.floor(width * 0.4)
+	local right_width = width - left_width - 1
+
+	local commit_height = math.floor(height * 0.3)
+	local files_height = height - commit_height - 1
 
 	commit_buf = api.nvim_create_buf(false, true)
-	file_buf = api.nvim_create_buf(false, true)
-	preview_buf = api.nvim_create_buf(false, true)
+	files_buf = api.nvim_create_buf(false, true)
+	diff_buf = api.nvim_create_buf(false, true)
 
 	commit_win = api.nvim_open_win(commit_buf, true, {
 		relative = "editor",
-		width = width,
+		width = left_width,
 		height = commit_height,
 		row = row,
 		col = col,
 		border = M.config.ui.border,
-		title = " Git Commit ",
+		title = " Commit Message ",
 		title_pos = "center",
 	})
 
-	file_win = api.nvim_open_win(file_buf, false, {
+	files_win = api.nvim_open_win(files_buf, false, {
 		relative = "editor",
-		width = file_width,
-		height = file_height,
+		width = left_width,
+		height = files_height,
 		row = row + commit_height + 1,
 		col = col,
 		border = M.config.ui.border,
@@ -718,69 +683,41 @@ function M.show_git_commit_ui()
 		title_pos = "center",
 	})
 
-	preview_win = api.nvim_open_win(preview_buf, false, {
+	diff_win = api.nvim_open_win(diff_buf, false, {
 		relative = "editor",
-		width = preview_width,
-		height = file_height,
-		row = row + commit_height + 1,
-		col = col + file_width + 1,
+		width = right_width,
+		height = height,
+		row = row,
+		col = col + left_width + 1,
 		border = M.config.ui.border,
-		title = " Preview ",
+		title = " Diff Preview ",
 		title_pos = "center",
 	})
 
-	for _, buf in ipairs({ commit_buf, file_buf, preview_buf }) do
+	for _, buf in ipairs({ commit_buf, files_buf, diff_buf }) do
 		api.nvim_buf_set_option(buf, "bufhidden", "wipe")
 		api.nvim_buf_set_option(buf, "buftype", "nofile")
 		api.nvim_buf_set_option(buf, "swapfile", false)
 	end
 
 	api.nvim_buf_set_option(commit_buf, "modifiable", true)
-	api.nvim_buf_set_lines(commit_buf, 0, -1, false, {
-		"🎯 Git Commit Interface",
-		"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-		"",
-		"Select files in the left panel, then press <Tab> to generate commit message",
-		"",
-		"Commands:",
-		"  <Tab>     Generate commit message",
-		"  q         Quit",
-	})
-	api.nvim_buf_set_option(commit_buf, "modifiable", false)
+	api.nvim_buf_set_option(diff_buf, "modifiable", false)
 
-	setup_file_buffer_keymaps()
 	setup_commit_buffer_keymaps()
+	setup_files_buffer_keymaps()
+	setup_diff_buffer_keymaps()
 
-	update_file_list()
-	api.nvim_set_current_win(file_win)
+	update_commit_message()
+	update_files_list()
+	update_diff_preview(nil)
 
-	notify_info("Git Commit UI opened - Select files with <Space>")
-end
-
--- Legacy auto-commit function
-function M.auto_commit(opts)
-	opts = opts or {}
-	local dry_run = opts.dry_run or false
-
-	if dry_run then
-		local status_output, err = get_git_status()
-		if err then
-			notify_error("Failed to get git status: " .. err)
-			return false
-		end
-
-		local files_info = parse_git_status(status_output)
-		if #files_info == 0 then
-			notify_info("No changes to commit")
-			return true
-		end
-
-		local commit_message = generate_commit_message(files_info)
-		notify_info("Would commit with message: " .. (commit_message or "Unable to generate message"))
-		return true
-	else
-		M.show_git_commit_ui()
+	api.nvim_set_current_win(files_win)
+	if #all_files > 0 then
+		api.nvim_win_set_cursor(files_win, { 3, 0 })
+		update_diff_preview(1)
 	end
+
+	notify_info("Git UI: " .. #staged_files .. " staged, " .. (#all_files - #staged_files) .. " unstaged files")
 end
 
 -- Setup function
@@ -789,38 +726,15 @@ function M.setup(opts)
 
 	api.nvim_create_user_command("GitCommit", function()
 		M.show_git_commit_ui()
-	end, { desc = "Open interactive git commit interface" })
+	end, { desc = "Open git commit interface" })
 
-	api.nvim_create_user_command("AutoCommit", function()
-		M.auto_commit()
-	end, { desc = "Open git commit interface (alias)" })
-
-	api.nvim_create_user_command("AutoCommitDry", function()
-		M.auto_commit({ dry_run = true })
-	end, { desc = "Preview commit message without UI" })
-
-	-- Set up keymaps if enabled
-	if M.config.keymaps then
-		for action, keymap in pairs(M.config.keymaps) do
-			if keymap then
-				if action == "git_commit" then
-					vim.keymap.set("n", keymap, function()
-						M.show_git_commit_ui()
-					end, { desc = "Open Git Commit UI", silent = true })
-				elseif action == "auto_commit" then
-					vim.keymap.set("n", keymap, function()
-						M.auto_commit()
-					end, { desc = "Git Commit Interface", silent = true })
-				elseif action == "dry_run" then
-					vim.keymap.set("n", keymap, function()
-						M.auto_commit({ dry_run = true })
-					end, { desc = "Preview commit message", silent = true })
-				end
-			end
-		end
+	if M.config.keymaps and M.config.keymaps.git_commit then
+		vim.keymap.set("n", M.config.keymaps.git_commit, function()
+			M.show_git_commit_ui()
+		end, { desc = "Open Git Commit UI", silent = true })
 	end
 
-	notify_info("Git Commit plugin loaded! Use :GitCommit to get started")
+	notify_info("Git Commit plugin loaded! Use :GitCommit")
 end
 
 return M
