@@ -96,12 +96,12 @@ return {
 				dashboard = "Home",
 			},
 			buttons = {
-				{
-					label = "View Repository",
-					url = function(opts)
-						return opts.repo_url
-					end,
-				},
+				--{
+				--	label = "View Repository",
+				--	url = function(opts)
+				--		return opts.repo_url
+				--	end,
+				--},
 				{
 					label = "View Config",
 					url = function(opts)
