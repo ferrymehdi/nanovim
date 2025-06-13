@@ -6,7 +6,7 @@ local resizemode = require("resize-mode")
 
 -- Helper function for keybinds
 local function k(mode, key, action, desc)
-  vim.keymap.set(mode, key, action, { desc = desc })
+	vim.keymap.set(mode, key, action, { desc = desc })
 end
 
 -- HEAD: Keybinds for all modes
@@ -32,10 +32,10 @@ k("n", "<leader>fb", "<CMD>Telescope buffers<CR>", "Find Buffers")
 k("n", "<leader>ff", "<CMD>Telescope find_files<CR>", "Search Files")
 k("n", "<leader>ft", "<cmd>TodoTelescope<CR>", "Telescope Todo Marks")
 k("n", "<leader>f/", function()
-  tbuiltin.current_buffer_fuzzy_find(themes.get_dropdown({ winblend = 10, previewer = false }))
+	tbuiltin.current_buffer_fuzzy_find(themes.get_dropdown({ winblend = 10, previewer = false }))
 end, "Fuzzily Search in Current Buffer")
 k("n", "<leader>s/", function()
-  tbuiltin.live_grep({ grep_open_files = true, prompt_title = "Live Grep in Open Files" })
+	tbuiltin.live_grep({ grep_open_files = true, prompt_title = "Live Grep in Open Files" })
 end, "Search in Open Files")
 
 -- Diagnostic keymaps
@@ -95,36 +95,46 @@ k("n", "]t", "<cmd>tabnext<CR>", "Goto Next tab")
 
 -- Format buffer using conform
 k("n", "<leader>F", function()
-  require("conform").format({ async = true, lsp_fallback = true })
+	require("conform").format({ async = true, lsp_fallback = true })
 end, "Format Buffer")
 
 -- Harpoon keymaps
-k("n", "<C-e>", function() harpoon:list():add() end, "Add to Harpoon")
-k("n", "gh", function() harpoon.ui:toggle_quick_menu(harpoon:list()) end, "Toggle Harpoon Menu")
-for i = 1, 9 do k("n", "g"..i, function() harpoon:list():select(i) end, "Select Harpoon "..i) end
+k("n", "<C-e>", function()
+	harpoon:list():add()
+end, "Add to Harpoon")
+k("n", "gh", function()
+	harpoon.ui:toggle_quick_menu(harpoon:list())
+end, "Toggle Harpoon Menu")
+for i = 1, 9 do
+	k("n", "g" .. i, function()
+		harpoon:list():select(i)
+	end, "Select Harpoon " .. i)
+end
 
 -- Open compile mode
 k("n", "<leader>j", ":Compile ", "Open Compile Mode")
 
 -- Search and replace word in buffer
 k("n", "<leader>cr", function()
-  local old_word = vim.fn.input("Word to replace: ")
-  if old_word == "" then return end
-  local new_word = vim.fn.input("Replace with: ")
-  local save_cursor = vim.fn.getpos(".")
-  vim.cmd("%s/\\<" .. old_word .. "\\>/" .. new_word .. "/g")
-  vim.fn.setpos(".", save_cursor)
+	local old_word = vim.fn.input("Word to replace: ")
+	if old_word == "" then
+		return
+	end
+	local new_word = vim.fn.input("Replace with: ")
+	local save_cursor = vim.fn.getpos(".")
+	vim.cmd("%s/\\<" .. old_word .. "\\>/" .. new_word .. "/g")
+	vim.fn.setpos(".", save_cursor)
 end, "Search and Replace in Buffer")
 
 -- Replace word under cursor
 k("n", "<leader>cc", function()
-  local word = vim.fn.expand("<cword>")
-  local new_word = vim.fn.input("Replace with: ")
-  if new_word ~= "" then
-    local save_cursor = vim.fn.getpos(".")
-    vim.cmd("%s/\\<" .. word .. "\\>/" .. new_word .. "/g")
-    vim.fn.setpos(".", save_cursor)
-  end
+	local word = vim.fn.expand("<cword>")
+	local new_word = vim.fn.input("Replace with: ")
+	if new_word ~= "" then
+		local save_cursor = vim.fn.getpos(".")
+		vim.cmd("%s/\\<" .. word .. "\\>/" .. new_word .. "/g")
+		vim.fn.setpos(".", save_cursor)
+	end
 end, "Replace Word in Buffer")
 
 -- LSP keymaps
@@ -139,9 +149,10 @@ k("n", "<leader>lr", vim.lsp.buf.rename, "Rename symbol")
 k("n", "<leader>ca", vim.lsp.buf.code_action, "Code Action")
 k("n", "<leader>cd", tbuiltin.diagnostics, "Show Files with Errors")
 k("n", "<leader>ci", function()
-  vim.lsp.buf.code_action({
-    context = { only = { "source.addMissingImports" } }, apply = true,
-  })
+	vim.lsp.buf.code_action({
+		context = { only = { "source.addMissingImports" } },
+		apply = true,
+	})
 end, "Import Missing Items")
 k("n", "K", vim.lsp.buf.hover, "Hover Documentation")
 
@@ -156,4 +167,3 @@ k("v", "J", ":m '>+1<CR>gv=gv", "Move Selected Text Down")
 k("v", "K", ":m '<-2<CR>gv=gv", "Move Selected Text Up")
 k("v", "<S-Up>", ":m '<-2<CR>gv=gv", "Move Selected Text Up")
 k("v", "<S-Down>", ":m '>+1<CR>gv=gv", "Move Selected Text Down")
-
