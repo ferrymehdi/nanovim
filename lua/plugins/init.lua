@@ -12,7 +12,7 @@ vim.opt.rtp:prepend(lazypath)
 require("lazy").setup("plugins", {
 	root = vim.fn.stdpath("data") .. "/lazy", -- directory where plugins will be installed
 	defaults = {
-		lazy = false, -- should plugins be lazy-loaded?
+		lazy = false,                      -- should plugins be lazy-loaded?
 		version = nil,
 		-- default `cond` you can use to globally disable a lot of plugins
 		-- when running inside vscode for example
@@ -125,7 +125,7 @@ require("lazy").setup("plugins", {
 		-- automatically check for plugin updates
 		enabled = false,
 		concurrency = nil, ---@type number? set to 1 to check for updates very slowly
-		notify = true, -- get a notification when new updates are found
+		notify = true,  -- get a notification when new updates are found
 		frequency = 3600, -- check for updates every hour
 		check_pinned = false, -- check for pinned packages that can't be updated
 	},
@@ -142,7 +142,7 @@ require("lazy").setup("plugins", {
 		rtp = {
 			reset = true, -- reset the runtime path to $VIMRUNTIME and your config directory
 			---@type string[]
-			paths = {}, -- add any custom paths here that you want to includes in the rtp
+			paths = {},  -- add any custom paths here that you want to includes in the rtp
 			---@type string[] list any plugins you want to disable here
 			disabled_plugins = {
 				-- "gzip",

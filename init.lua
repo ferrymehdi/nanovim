@@ -18,3 +18,6 @@ require("settings.globals")
 require("settings.autoCommands")
 -- load the keybinds
 require("settings.keybinds")
+
+
+require('lspconfig').jdtls.setup {}

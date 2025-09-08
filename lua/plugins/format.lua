@@ -15,6 +15,7 @@ return { -- Autoformat
 				typescript = { "prettierd", "prettier", stop_after_first = true },
 				javascriptreact = { "prettierd", "prettier", stop_after_first = true },
 				typescriptreact = { "prettierd", "prettier", stop_after_first = true },
+				-- java = { "google_java_format" },
 
 				-- Use the "*" filetype to run formatters on all filetypes.
 				["*"] = { "codespell" },
