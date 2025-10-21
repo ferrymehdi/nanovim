@@ -1,22 +1,22 @@
 return {
     "neovim/nvim-lspconfig",
     dependencies = {
-        {"mason-org/mason.nvim", opts = {}},
-        {"mason-org/mason-lspconfig.nvim", branch = "v1.x"},
-        {"j-hui/fidget.nvim", opts = {}},
+        { "mason-org/mason.nvim",           opts = {} },
+        { "mason-org/mason-lspconfig.nvim", branch = "v1.x" },
+        { "j-hui/fidget.nvim",              opts = {} },
     },
     opts = {
         servers = {
-           lua_ls = {},
-           rust_analyzer = {},
-           clangd = {},
-           gopls = {},
-           ts_ls = {},
+            lua_ls = {},
+            rust_analyzer = {},
+            clangd = {},
+            gopls = {},
+            ts_ls = {},
         },
     },
     config = function(_, opts)
         vim.api.nvim_create_autocmd('LspAttach', {
-          group = vim.api.nvim_create_augroup('lsp-attach', { clear = true }),
+            group = vim.api.nvim_create_augroup('lsp-attach', { clear = true }),
             callback = function(event)
                 -- This function resolves a difference between neovim nightly (version 0.11) and stable (version 0.10)
                 ---@param client vim.lsp.Client
